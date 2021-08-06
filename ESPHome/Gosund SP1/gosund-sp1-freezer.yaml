@@ -1,0 +1,282 @@
+### https://github.com/denkyem/SmartHomeConfigs
+
+substitutions:
+  devicename: gosund-sp1-freezer
+  friendly_name: Gosund SP1 Freezer
+  high_consumption_alert_time: 1h
+  low_consumption_alert_time: 3h
+  refresh: 5s
+
+esphome:
+  name: ${devicename}
+  platform: ESP8266
+  board: esp8285
+
+logger:
+api:
+ota:
+wifi:
+  ssid: <<SSID>>
+  password: !secret wifi_password
+  domain: !secret domain
+  ap:
+    ssid: ${devicename}
+    password: !secret wifi_password
+captive_portal:
+web_server:
+  port: 80
+
+
+
+
+
+time:
+  - platform: homeassistant
+    timezone: 'Europe/Lisbon'
+    id: sntp_time  
+
+
+
+# Text sensors with general information.
+text_sensor:
+  # Expose ESPHome version as sensor.
+  - platform: version
+    name: ${friendly_name} ESPHome Version
+  # Expose WiFi information as sensors.
+  - platform: wifi_info
+    ip_address:
+      name: ${friendly_name} IP
+      
+  - platform: template
+    name: ${friendly_name} Lastboot
+    lambda: |-
+      char str[25];
+      time_t currTime = id(sntp_time).utcnow().timestamp - id(uptime_sensor).state;
+      strftime(str, sizeof(str), "%Y-%m-%dT%H:%M:%S", localtime(&currTime));
+      return  { str };
+    update_interval: 60s
+    
+    
+
+
+sensor:
+  - platform: uptime
+    id: uptime_sensor
+    
+  - platform: wifi_signal
+    name: ${friendly_name} WiFi Signal Sensor
+    update_interval: 30s
+    force_update: false
+  
+
+
+
+
+# Power sensor
+  - platform: hlw8012
+    sel_pin:
+      number: GPIO12
+      inverted: true
+    cf_pin: GPIO04
+    cf1_pin: GPIO05
+    change_mode_every: 3
+    update_interval: ${refresh}
+    # Current sensor
+    current:
+      name: ${friendly_name} Current
+      unit_of_measurement: A
+      accuracy_decimals: 3
+      filters:
+        # Map from sensor -> measured value
+        - calibrate_linear:
+            - 0.0 -> 0.02
+            - 0.762 -> 0.82
+            - 6.964 -> 6.15
+            - 1.327 -> 1.11
+            - 5.449 -> 4.55
+            - 9.482 -> 7.92
+
+        # Make everything below 0.03A appear as just 0A.
+        # Furthermore it corrects 0.02A for the power usage of the plug.
+        - lambda: if (x < (0.03 - 0.02)) return 0; else return (x - 0.02);
+
+      
+    # Voltage sensor
+    voltage:
+      name: ${friendly_name} Voltage
+      unit_of_measurement: V
+      accuracy_decimals: 1
+      filters:
+        # Map from sensor -> measured value
+        - calibrate_linear:
+            - 0.0 -> 0.0
+            - 578.2 -> 237.2
+            - 574.6 -> 235.5
+            - 568.5 -> 232.8
+            - 564.0 -> 230.9
+
+    # Power sensor
+    power:
+      id: power
+      name: ${friendly_name} Power
+      unit_of_measurement: W
+      accuracy_decimals: 1
+      filters:
+        # Map from sensor -> measured value
+        - calibrate_linear:
+            - 0.0 -> 1.20
+            - 761.3 -> 137.45
+            - 3010.0 -> 539.56
+            - 7457.7 -> 1333.7
+            - 1460.5 -> 263.27
+            - 5939.3 -> 1061.96
+            - 10215.4 -> 1828.04
+        # Make everything below 1W appear as just 0W.
+        # Furthermore it corrects 1.20W for the power usage of the plug.
+        - lambda: if (x < (1 + 1.20)) return 0; else return (x - 1.20);
+
+  # Total daily energy sensor
+  - platform: total_daily_energy
+    name: ${friendly_name} Daily Energy
+    power_id: power
+    filters:
+      # Multiplication factor from W to kW is 0.001
+      - multiply: 0.001
+    unit_of_measurement: kWh
+    
+    
+
+binary_sensor:
+  # Binary sensor for the button press
+  - platform: gpio
+    name: ${friendly_name} Button
+    pin:
+      number: GPIO3
+      inverted: true
+    on_press:
+      - switch.toggle: relay
+      
+      
+      
+################################################################################
+#                               Fridge is cooling                              #
+################################################################################
+  - platform: template
+    name: ${friendly_name} Cooling
+    device_class: cold
+    id: cooling
+    filters:
+      - delayed_on: 5s # MINIMUM TIME TO AVOID FALSE POSITIVES
+      - delayed_off: 10s
+    lambda: |-
+      if (isnan(id(power).state)) {
+        return {};
+      } else if (id(power).state > 4) {
+        // Running
+        return true;
+      } else {
+        // Not running
+        return false;
+      }
+    on_press:
+      then:
+        - light.turn_on: led
+    on_release:
+      then: 
+        - light.turn_off: led
+
+################################################################################
+#                               HIGH CONSUMPTION                               #
+################################################################################
+  - platform: template
+    name: ${friendly_name} High Consumption
+    id: high_consumption
+    device_class: problem
+    filters:
+      - delayed_on: ${high_consumption_alert_time} # IF IT IS CONSUMING FOR MORE THAN 1 HOUR
+      - delayed_off: 10s
+    lambda: |-
+      if (id(cooling).state) {
+        return true;
+      } else {
+        return false;
+      }
+    on_press:
+      then:
+        - homeassistant.service:
+            service: persistent_notification.create
+            data:
+              title: Message from ${friendly_name}
+              notification_id: ${devicename}
+            data_template:
+              message: A arca frigorífica está a refrigerar há mais de ${high_consumption_alert_time}. Alguma porta mal fechada?
+
+
+
+
+################################################################################
+#                                LOW CONSUMPTION                               #
+################################################################################
+  - platform: template
+    name: ${friendly_name} Low Consumption
+    id: low_consumption
+    device_class: problem
+    filters:
+      - delayed_on: ${low_consumption_alert_time} # IF IT ISN'T CONSUMING FOR MORE THAN 6 HOUR
+      - delayed_off: 10s
+    lambda: |-
+      if (not id(cooling).state) {
+        return true;
+      } else {
+        return false;
+      }
+    on_press:
+      then:
+        - homeassistant.service:
+            service: persistent_notification.create
+            data:
+              title: Message from ${friendly_name}
+              notification_id: ${devicename}
+            data_template:
+              message: A arca frigorífica não trabalha há mais de ${low_consumption_alert_time}.
+    on_release:
+      then: 
+        - homeassistant.service:
+            service: persistent_notification.dismiss
+            data:
+              notification_id: ${devicename}
+
+
+################################################################################
+      
+switch:
+  # Switch to restart the plug
+  - platform: restart
+    name: ${friendly_name} Restart
+  # Switch to toggle the relay
+  - platform: gpio
+    id: relay
+    name: ${friendly_name} Switch
+    pin: GPIO14
+    restore_mode: ALWAYS_ON
+
+
+output:
+  # Relay state led
+  - platform: esp8266_pwm
+    id: state_led
+    pin:
+      number: GPIO1
+      inverted: true
+
+light:
+  # Relay state light
+  - platform: monochromatic
+    output: state_led
+    id: led
+
+# Uses the red LED as a status indicator
+status_led:
+  pin:
+    number: GPIO13
+    inverted: true
