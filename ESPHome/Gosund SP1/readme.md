@@ -6,7 +6,7 @@ And also, follow Frenck's tutorial to calibrate the power plug (link at the bott
 This ESPhome config will create several sensors on Home Assistant
 ![screenshot](screenshot.png?raw=true)
 
-Including a Energy Sensor that works with the energy Energy Dashboard
+Including a Energy Sensor that works with the new Energy Dashboard
 
 ![screenshot](screenshot2.png?raw=true)
 
